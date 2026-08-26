@@ -1,0 +1,258 @@
+---
+title: "Untitled"
+author: "Ferdian Hidayat"
+date: "2026-08-30"
+output:
+  rmdformats::readthedown
+---
+
+```{r}
+library(dplyr)
+library(TTR)
+library(forecast)
+library(lmtest) 
+library(orcutt)
+library(HoRM)
+```
+
+# Soal 1
+
+## Data
+```{r}
+data_sales <- data.frame(
+  Year = c(1975:2014),
+  Sales = c(11.7, 12.0, 12.3, 12.8, 13.1, 13.6, 13.9, 14.4, 14.7, 15.3, 
+            15.5, 15.8, 16.1, 16.6, 16.9, 16.7, 16.9, 17.4, 17.6, 17.9,
+            18.0, 17.9, 18.0, 18.2, 18.2, 18.3, 18.6, 19.2, 19.3, 19.5, 
+            19.2, 19.3, 19.5, 20.0, 20.0, 19.9, 19.8, 19.9, 20.2, 21.0),
+  Advertising = c(9.4, 9.6, 10.0, 10.4, 10.8, 10.9, 11.7, 12.2, 12.5, 12.9, 
+                  13.0, 13.2, 13.8, 14.2, 14.6, 14.4, 15.0, 15.4, 15.7, 15.9,
+                  15.9, 16.0, 16.3, 16.2, 16.8, 17.3, 17.6, 18.1, 18.3, 18.5, 
+                  18.7, 18.9, 19.2, 20.0, 20.0, 20.3, 20.4, 21.0, 21.5, 22.1)
+)
+```
+
+## Model Awal
+```{r}
+model <- lm(Sales ~ Advertising, data = data_sales)
+summary(model)
+```
+
+## Pengecekan Asumsi
+```{r}
+# Hitung sisaan dan fitted values dari model Anda
+sisaan <- residuals(model)
+fitValue <- fitted(model)
+
+# Diagnostik dengan eksploratif
+par(mfrow = c(2, 2))
+
+# 1. Normal Q-Q Plot
+qqnorm(sisaan)
+qqline(sisaan, col = "steelblue", lwd = 2)
+
+# 2. Sisaan vs Fitted Values (Label sudah dibetulkan)
+plot(fitValue, sisaan, col = "steelblue", pch = 20, xlab = "Fitted Values", ylab = "Sisaan", main = "Sisaan vs Fitted Values")
+abline(a = 0, b = 0, lwd = 2)
+
+# 3. Histogram Sisaan
+hist(sisaan, col = "steelblue", main = "Histogram Sisaan", xlab = "Sisaan")
+
+# 4. Sisaan vs Order (Panjang x diubah otomatis sesuai jumlah sisaan)
+n_data <- length(sisaan)
+plot(seq(1, n_data, 1), sisaan, col = "steelblue", pch = 20, xlab = "Order", ylab = "Sisaan", main = "Sisaan vs Order")
+lines(seq(1, n_data, 1), sisaan, col = "red")
+abline(a = 0, b = 0, lwd = 2)
+
+# Kembalikan layout plot ke normal (1x1)
+par(mfrow = c(1, 1))
+```
+
+
+
+```{r}
+dwtest(model)
+```
+Berdasarkan hasil uji Durbin-Watson pada model, diperoleh nilai statistik $DW = 0.16204$ dengan $p\text{-value} < 2.2 \times 10^{-16}$. Karena nilai $p\text{-value}$ jauh lebih kecil dari taraf nyata $\alpha = 0.05$, maka diputuskan untuk menolak $H_0$. Hal ini menunjukkan bahwa terdapat bukti yang sangat kuat bahwa terdapat autokorelasi positif yang sangat tinggi pada sisaan model regresi awal.
+
+## Penanganan autokorleasi menggunakan Cochrane Orcutt
+```{r}
+modelCO<-cochrane.orcutt(model)
+modelCO
+```
+Berdasarkan hasil estimasi Cochrane-Orcutt, model awal yang semula mengalami masalah autokorelasi positif kuat ($DW = 0.16204$, $p$-value $< 0.05$) berhasil ditangani. Setelah dilakukan transformasi dengan nilai $\rho = 0.903123$, diperoleh statistik Durbin-Watson yang baru sebesar $DW = 1.93925$ dengan $p$-value $= 0.378$ ($\alpha > 0.05$). Hal ini menunjukkan bahwa asumsi bebas autokorelasi telah terpenuhi. Persamaan regresi akhir yang terbentuk adalah $\text{Sales} = 10.252375 + 0.488489(\text{Advertising})$.
+
+##  Penanganan autokorleasi menggunakan Hildreth-Lu
+```{r}
+library(HoRM)
+
+# Ambil y (Sales) dan x (Advertising satu prediktor)
+y <- data_sales$Sales
+x <- data_sales$Advertising
+
+# Grid search rho dari 0 sampai 0.9 dengan interval 0.1
+r <- seq(0, 0.9, by = 0.001)
+tab <- data.frame(
+  rho = r,
+  SSE = sapply(r, function(rr) deviance(hildreth.lu(y, x, rr)))
+)
+
+# Menampilkan tabel hasil SSE untuk setiap nilai rho
+tab  
+```
+
+```{r}
+rho_hat <- tab$rho[which.min(tab$SSE)]   # rho terbaik
+fit_hl  <- hildreth.lu(y, x, rho_hat)    # model final
+summary(fit_hl)
+```
+
+```{r}
+dwtest(fit_hl)
+```
+Berdasarkan hasil estimasi menggunakan metode Hildreth-Lu, model regresi akhir yang diperoleh berhasil mengatasi masalah autokorelasi. Hal ini dibuktikan melalui uji Durbin-Watson yang menghasilkan nilai $DW = 1.9402$ dengan $p\text{-value} = 0.3782$ ($\alpha > 0.05$), yang berarti sisaan model sudah saling bebas (tidak ada autokorelasi). Persamaan regresi akhir yang terbentuk adalah $\hat{y} = 1.01310 + 0.49358x$
+
+## Perbandingan
+```{r}
+# Pastikan nama model Anda sesuai:
+# 1. model = model awal (sebelum penanganan)
+# 2. model_co  = model dari Cochrane-Orcutt (package orcutt)
+# 3. model_final_hl = model dari Hildreth-Lu
+
+# Menghitung Sum of Squared Errors (SSE) untuk masing-masing model
+sseModelawal <- anova(model)$`Sum Sq`[-1]
+sseModelCO   <- sum(residuals(modelCO)^2)       # Mengambil SSE dari Cochrane-Orcutt
+sseModelHL   <- anova(fit_hl)$`Sum Sq`[-1]
+
+# Menghitung Mean Squared Error (MSE) dengan membagi SSE dengan jumlah data (n = 40)
+n <- length(data_sales$Sales)
+mseModelawal <- sseModelawal / n
+mseModelCO   <- sseModelCO / n
+mseModelHL   <- sseModelHL / n
+
+# Membuat matriks rangkuman akurasi
+akurasi <- matrix(c(sseModelawal, sseModelCO, sseModelHL,
+                    mseModelawal, mseModelCO, mseModelHL), 
+                  nrow = 2, ncol = 3, byrow = TRUE)
+
+colnames(akurasi) <- c("Model Awal", "Model Cochrane-Orcutt", "Model Hildreth-Lu")
+row.names(akurasi) <- c("SSE", "MSE")
+
+# Menampilkan tabel hasil
+akurasi
+```
+Berdasarkan perbandingan menggunakan Sum of Squared Errors (SSE) dan Mean Squared Error (MSE), Model Hildreth-Lu merupakan model terbaik karena menghasilkan nilai kesalahan prediksi yang paling minimum (SSE = 1.29139, MSE = 0.03228). Sementara itu, metode Cochrane-Orcutt pada kasus ini menghasilkan kesalahan yang lebih tinggi dibanding model awal.
+
+# Soal 2
+
+## Data
+```{r}
+data_market <- data.frame(
+  Period = c(1:20),
+  Market_share = c(
+    3.63, 4.20, 3.33, 4.54, 2.89, 4.87, 4.90, 5.29, 6.18, 7.20,
+    7.25, 6.09, 6.80, 8.65, 8.43, 8.29, 7.18, 7.90, 8.45, 8.23
+  ),
+  Price = c(
+    0.97, 0.95, 0.99, 0.91, 0.98, 0.90, 0.89, 0.86, 0.85, 0.82,
+    0.79, 0.83, 0.81, 0.77, 0.76, 0.80, 0.83, 0.79, 0.76, 0.78
+  )
+)
+
+head(data_market)
+```
+
+## Model Awal
+```{r}
+model2 <- lm(Market_share ~ Price, data = data_market)
+summary(model2)
+```
+
+## Pengecekan Asumsi
+
+```{r}
+sisaan2 <- residuals(model2)
+fitValue2 <- fitted(model2)
+
+par(mfrow = c(2, 2))
+qqnorm(sisaan2)
+qqline(sisaan2, col = "steelblue", lwd = 2)
+
+plot(fitValue2, sisaan2, col = "steelblue", pch = 20, xlab = "Fitted Values", ylab = "Sisaan", main = "Sisaan vs Fitted Values")
+abline(a = 0, b = 0, lwd = 2)
+
+hist(sisaan2, col = "steelblue", main = "Histogram Sisaan", xlab = "Sisaan")
+
+n_data <- length(sisaan2)
+plot(seq(1, n_data, 1), sisaan2, col = "steelblue", pch = 20, xlab = "Order", ylab = "Sisaan", main = "Sisaan vs Order")
+lines(seq(1, n_data, 1), sisaan2, col = "red")
+abline(a = 0, b = 0, lwd = 2)
+
+par(mfrow = c(1, 1))
+```
+
+
+
+```{r}
+dwtest(model2)
+```
+Berdasarkan hasil uji Durbin-Watson pada model awal, diperoleh nilai statistik $DW = 1.1358$ dengan $p\text{-value} = 0.009813$. Karena nilai $p\text{-value}$ lebih kecil dari taraf nyata $\alpha = 0.05$, maka diputuskan untuk menolak $H_0$. Hal ini menunjukkan bahwa terdapat bukti yang cukup untuk menyimpulkan bahwa terdapat autokorelasi positif pada sisaan model regresi
+
+## Penanganan autokorleasi menggunakan Cochrane Orcutt
+```{r}
+modelCO2 <- cochrane.orcutt(model2)
+modelCO2
+```
+Berdasarkan hasil estimasi Cochrane-Orcutt, model awal yang semula terdeteksi mengalami autokorelasi positif ($DW = 1.13582$, $p$-value $< 0.05$) berhasil ditangani. Setelah dilakukan transformasi menggunakan nilai $\rho = 0.425232$ dalam 8 iterasi, diperoleh statistik Durbin-Watson yang baru sebesar $DW = 1.95804$ dengan $p$-value $= 0.4151$ ($\alpha > 0.05$). Hal ini menunjukkan bahwa asumsi bebas autokorelasi telah terpenuhi. Persamaan regresi akhir yang terbentuk adalah $\text{Market\_share} = 26.72209 - 24.08413(\text{Price})$.
+
+##  Penanganan autokorleasi menggunakan Hildreth-Lu
+```{r}
+library(HoRM)
+
+y <- data_market$Market_share
+x <- data_market$Price
+
+# Menggunakan r2 dan konsisten memanggil r2 di sapply
+r2 <- seq(0, 0.9, by = 0.001)
+tab <- data.frame(
+  rho = r2,
+  SSE = sapply(r2, function(rr) deviance(hildreth.lu(y, x, rr)))
+)
+
+head(tab)
+```
+
+```{r}
+rho_hat2 <- tab$rho[which.min(tab$SSE)]   # rho terbaik
+fit_hl2  <- hildreth.lu(y, x, rho_hat2)    # model final (menggunakan rho_hat2)
+summary(fit_hl2)
+```
+
+```{r}
+dwtest(fit_hl2)
+```
+Berdasarkan hasil estimasi menggunakan metode Hildreth-Lu, model regresi akhir yang diperoleh berhasil mengatasi masalah autokorelasi. Hal ini dibuktikan melalui uji Durbin-Watson yang menghasilkan nilai $DW = 1.9577$ dengan $p\text{-value} = 0.4148$ ($\alpha > 0.05$), yang berarti sisaan model sudah saling bebas dari autokorelasi. Persamaan regresi akhir yang terbentuk adalah $\hat{y} = 15.3655 - 24.0848x$ dengan koefisien determinasi yang sangat tinggi yaitu $R^2 = 90.08\%$.
+
+## Perbandingan
+```{r}
+sseModelawal2 <- anova(model2)$`Sum Sq`[-1]
+sseModelCO2   <- sum(residuals(modelCO2)^2)        
+sseModelHL2   <- anova(fit_hl2)$`Sum Sq`[-1]
+
+n <- length(data_market$Market_share)
+mseModelawal2 <- sseModelawal2 / n
+mseModelCO2   <- sseModelCO2 / n
+mseModelHL2   <- sseModelHL2 / n
+
+# Matriks akurasi menggunakan variabel berakhiran '2'
+akurasi <- matrix(c(sseModelawal2, sseModelCO2, sseModelHL2,
+                    mseModelawal2, mseModelCO2, mseModelHL2), 
+                  nrow = 2, ncol = 3, byrow = TRUE)
+
+colnames(akurasi) <- c("Model Awal", "Model Cochrane-Orcutt", "Model Hildreth-Lu")
+row.names(akurasi) <- c("SSE", "MSE")
+
+akurasi
+```
+Berdasarkan perbandingan model menggunakan Sum of Squared Errors (SSE) dan Mean Squared Error (MSE), Model Hildreth-Lu adalah model terbaik karena menghasilkan tingkat kesalahan prediksi yang paling minimum (SSE = 2.65937, MSE = 0.13297).
+

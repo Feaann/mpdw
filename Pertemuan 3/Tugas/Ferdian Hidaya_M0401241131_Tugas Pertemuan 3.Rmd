@@ -1,0 +1,306 @@
+---
+title: "Tugas"
+author: "Ferdian Hidayat"
+date: "2026-09-03"
+output:
+  rmdformats::readthedown
+---
+```{r}
+library(dLagM)
+library(dynlm)
+library(MLmetrics)
+library(lmtest)
+library(car)
+```
+
+# Latihan 1
+
+## Import Data
+```{r}
+# Membuat dataframe di R
+data_market <- data.frame(
+  Period = 1:20,
+  Market_share = c(
+    3.63, 4.20, 3.33, 4.54, 2.89, 4.87, 4.90, 5.29, 6.18, 7.20, # Periode 1-10
+    7.25, 6.09, 6.80, 8.65, 8.43, 8.29, 7.18, 7.90, 8.45, 8.23  # Periode 11-20
+  ),
+  Price = c(
+    0.97, 0.95, 0.99, 0.91, 0.98, 0.90, 0.89, 0.86, 0.85, 0.82, # Periode 1-10
+    0.79, 0.83, 0.81, 0.77, 0.76, 0.80, 0.83, 0.79, 0.76, 0.78  # Periode 11-20
+  )
+)
+
+# Melihat isi dataframe
+print(data_market)
+```
+
+## Splitting Data
+
+```{r}
+# SPLIT DATA (70% Train, 30% Test)
+train <- data_market[1:14, ]
+test  <- data_market[15:20, ]
+```
+
+```{r}
+train.ts<-ts(train)
+test.ts<-ts(test)
+data_market.ts<-ts(data_market)
+```
+
+
+## Model Kyock (Infinite Distributed Lag)
+
+```{r}
+#MODEL KOYCK
+model.koyck <- koyckDlm(x = train$Price,y = train$Market_share)
+summary(model.koyck)
+```
+
+```{r}
+AIC(model.koyck)
+```
+```{r}
+BIC(model.koyck)
+```
+
+```{r}
+fore.koyck <- forecast(model = model.koyck, x=test$Price, h=6)
+fore.koyck
+```
+```{r}
+mape.koyck <- MAPE(fore.koyck$forecasts, test$Market_share)
+mape.koyck #data test
+```
+
+## Regression with Distributed Lag
+
+### penentuan lag optimum 
+
+```{r}
+finiteDLMauto(formula = Market_share ~ Price,
+              data = data.frame(train), q.min = 1, q.max = 12,
+              model.type = "dlm", error.type = "AIC", trace = TRUE)
+```
+## Pemodelan
+```{r}
+model.dlm <- dlm(x = train$Price,y = train$Market_share , q = 3)
+summary(model.dlm)
+```
+```{r}
+fore.dlm <- forecast(model = model.dlm, x=test$Price, h=6)
+fore.dlm
+```
+```{r}
+mape.dlm <- MAPE(fore.dlm$forecasts, test$Market_share)
+mape.dlm
+```
+## ARDL
+
+
+### Pemodelan
+```{r}
+model.ardl1 <- ardlDlm(x = train$Price,y = train$Market_share , p = 1 , q = 1)
+summary(model.ardl1)
+```
+
+### Lag Optimum
+```{r}
+model.ardl1.opt <- ardlBoundOrders(
+  data = train,
+  ic = "AIC",
+  formula = Market_share ~ Price,
+  max.p = 5,
+  max.q = 5,
+  FullSearch = TRUE
+)
+
+model.ardl1.opt
+```
+
+### Pemodelan Dengan Lag terbaik
+```{r}
+model.ardl1.terbaik <- ardlDlm(
+  formula = Market_share ~ Price,
+  data = train,
+  p = 2,
+  q = 1
+)
+
+summary(model.ardl1.terbaik)
+```
+```{r}
+fore.ardl1 <- forecast(
+  model = model.ardl1.terbaik,
+  x = test$Price,
+  h = 6
+)
+
+fore.ardl1
+```
+```{r}
+mape.ardl1 <- MAPE(fore.ardl1$forecasts, test$Market_share)
+mape.ardl1
+```
+## Perbandingan Model
+```{r}
+akurasi <- matrix(c(mape.koyck, mape.dlm, mape.ardl1))
+row.names(akurasi)<- c("Koyck","DLM","ARDL")
+colnames(akurasi) <- c("MAPE")
+akurasi
+```
+```{r}
+# 1. Urutkan data berdasarkan Price dari yang terkecil ke terbesar agar garis tidak zig-zag
+idx <- order(test$Price)
+
+p_sort       <- test$Price[idx]
+aktual_sort  <- test$Market_share[idx]
+koyck_sort   <- fore.koyck$forecasts[idx]
+dlm_sort     <- fore.dlm$forecasts[idx]
+ardl_sort    <- fore.ardl1$forecasts[idx]
+
+# 2. Atur layout grafik tunggal
+par(mfrow=c(1,1))
+
+# 3. Plot data aktual yang sudah diurutkan
+plot(p_sort, aktual_sort, type="b", col="black", pch=16,
+     xlab = "Price", ylab = "Market Share",
+     ylim = range(c(aktual_sort, koyck_sort, dlm_sort, ardl_sort), na.rm = TRUE))
+
+# 4. Tambahkan garis ramalan dari masing-masing model
+points(p_sort, koyck_sort, col="red", pch=16);   lines(p_sort, koyck_sort, col="red", lty=1)
+points(p_sort, dlm_sort, col="blue", pch=16);    lines(p_sort, dlm_sort, col="blue", lty=1)
+points(p_sort, ardl_sort, col="green", pch=16);  lines(p_sort, ardl_sort, col="green", lty=1)
+
+# 5. Legenda disesuaikan dengan 4 model yang benar-benar di-plot
+legend("topright",  # Pindahkan ke kanan atas (atau "bottomright" / "bottomleft")
+       legend = c("Aktual", "Koyck", "DLM", "ARDL"),
+       lty = 1, pch = 16, 
+       col = c("black", "red", "blue", "green"), 
+       cex = 0.8)
+```
+
+Berdasarkan hasil perbandingan akurasi peramalan menggunakan Mean Absolute Percentage Error (MAPE), diperoleh nilai MAPE untuk model Koyck sebesar 0,05658583 atau 5,66%, model DLM sebesar 0,05960423 atau 5,96%, dan model ARDL sebesar 0,05508323 atau 5,51%. Dari ketiga model tersebut, model ARDL memiliki nilai MAPE paling rendah, yaitu sebesar 5,51%. Hal ini menunjukkan bahwa model ARDL menghasilkan tingkat kesalahan peramalan paling kecil sehingga memiliki akurasi peramalan yang paling baik dibandingkan model Koyck dan DLM.
+
+Dengan demikian, berdasarkan kriteria nilai MAPE terkecil, model ARDL dipilih sebagai model terbaik untuk melakukan peramalan Market Share. Hasil peramalan menggunakan model ARDL(2,1) untuk enam periode ke depan menghasilkan nilai prediksi berturut-turut sebesar 8,3844; 7,3388; 6,6078; 7,5273; 8,2222; dan 7,7647.
+
+# Latihan 2
+
+## Input Data
+
+```{r}
+# Membuat dataframe untuk data Sales dan Advertising (1975 - 2014)
+data_sales <- data.frame(
+  Year = 1975:2014,
+  Sales = c(
+    11.7, 12.0, 12.3, 12.8, 13.1, 13.6, 13.9, 14.4, 14.7, 15.3, # 1975-1984
+    15.5, 15.8, 16.1, 16.6, 16.9, 16.7, 16.9, 17.4, 17.6, 17.9, # 1985-1994
+    18.0, 17.9, 18.0, 18.2, 18.2, 18.3, 18.6, 19.2, 19.3, 19.5, # 1995-2004
+    19.2, 19.3, 19.5, 20.0, 20.0, 19.9, 19.8, 19.9, 20.2, 21.0  # 2005-2014
+  ),
+  Advertising = c(
+    9.4, 9.6, 10.0, 10.4, 10.8, 10.9, 11.7, 12.2, 12.5, 12.9, # 1975-1984
+    13.0, 13.2, 13.8, 14.2, 14.6, 14.4, 15.0, 15.4, 15.7, 15.9, # 1985-1994
+    15.9, 16.0, 16.3, 16.2, 16.8, 17.3, 17.6, 18.1, 18.3, 18.5, # 1995-2004
+    18.7, 18.9, 19.2, 20.0, 20.0, 20.3, 20.4, 21.0, 21.5, 22.1  # 2005-2014
+  )
+)
+
+# Melihat ringkasan atau isi data
+head(data_sales)
+tail(data_sales)
+```
+
+## Splitting Data
+```{r}
+# Data training: 1975-2008
+train <- subset(data_sales, Year <= 2008)
+
+# Data testing: 2009-2014
+test <- subset(data_sales, Year >= 2009)
+
+nrow(train)
+nrow(test)
+```
+
+## Mencari Lag Optimal
+```{r}
+model.ardl2.opt <- ardlBoundOrders(
+  data = train,
+  ic = "AIC",
+  formula = Sales ~ Advertising,
+  max.p = 14,
+  max.q = 14,
+  FullSearch = TRUE
+)
+
+model.ardl2.opt
+```
+
+## Pemodelan dengan lag optimal
+```{r}
+model.ardl2.terbaik <- ardlDlm(
+  formula = Sales ~ Advertising,
+  data = train,
+  p = 8,
+  q = 10
+)
+
+summary(model.ardl2.terbaik)
+```
+
+
+## Peramalan
+```{r}
+fore.ardl <- forecast(
+  model = model.ardl2.terbaik,
+  x = test$Advertising,
+  h = 6
+)
+
+fore.ardl$forecasts
+```
+```{r}
+hasil.forecast <- data.frame(
+  Year = test$Year,
+  Sales_Aktual = test$Sales,
+  Sales_Forecast = as.numeric(fore.ardl$forecasts)
+)
+
+hasil.forecast
+```
+## Akurasi Model
+```{r}
+mape.ardl <- MAPE(
+  fore.ardl$forecasts,
+  test$Sales
+)
+
+mape.ardl
+```
+```{r}
+plot(
+  test$Year,
+  test$Sales,
+  type = "b",
+  ylim = range(c(test$Sales, fore.ardl$forecasts)),
+  xlab = "Tahun",
+  ylab = "Sales",
+  main = "Forecast Sales dengan ARDL(8,10)"
+)
+
+lines(
+  test$Year,
+  fore.ardl$forecasts,
+  type = "b"
+)
+
+legend(
+  "topleft",
+  legend = c("Aktual", "Forecast ARDL"),
+  lty = 1,
+  pch = 1
+)
+```
+Berdasarkan kriteria AIC, model terbaik yang diperoleh adalah ARDL(8,10). Model tersebut kemudian digunakan untuk melakukan forecasting Sales pada periode 2009–2014. Hasil evaluasi menunjukkan nilai MAPE sebesar 2,10%, sehingga model ARDL(8,10) memiliki tingkat akurasi prediksi yang sangat baik.
+

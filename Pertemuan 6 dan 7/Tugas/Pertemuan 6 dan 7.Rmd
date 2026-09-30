@@ -1,0 +1,726 @@
+---
+title: "Pemodelan ARIMA - Pendugaan Parameter, Diagnostik Model, dan Peramalan"
+subtitle: "Jumlah Penumpang Harian Monorail (100 Periode)"
+author: "Ferdian Hidayat"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: show
+    df_print: paged
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+# Pembantu format angka (koma desimal) agar teks interpretasi mengikuti hasil kode
+fmt  <- function(x, d = 3) format(round(x, d), decimal.mark = ",", nsmall = d)
+fmtp <- function(p) ifelse(p < 0.0001, "< 0,0001", fmt(p, 4))
+```
+
+# Packages
+
+```{r}
+library(readxl)
+library(ggplot2)
+library(tseries)
+library(MASS)
+library(forecast)
+library(TSA)
+library(lmtest)
+library(car)
+library(knitr)
+```
+
+
+# Data
+
+Data yang digunakan adalah data jumlah penumpang harian Monorail sebanyak
+100 periode, yaitu mulai 13 Februari 2024 sampai 22 Mei 2024.
+
+```{r}
+# File data diletakkan satu folder dengan Rmd ini di repositori GitHub
+# (atau ganti dengan URL raw GitHub, seperti pada materi)
+file.data <- "D:\\Kuliah\\Semester 5\\Metode Peramalan Deret Waktu\\mpdw\\Pertemuan 6 dan 7\\Tugas\\Data 100 Periode.xlsx"
+
+data100 <- read_excel(file.data)
+colnames(data100) <- c("date", "y")
+data100$date <- as.Date(data100$date)
+head(data100)
+
+cat("Periode:", format(min(data100$date)), "s.d.", format(max(data100$date)),
+    "| Jumlah data:", nrow(data100), "| Data hilang:", sum(is.na(data100$y)))
+```
+
+Data dibagi menjadi data latih dan data uji dengan proporsi 80:20 (80 data
+latih dan 20 data uji). Karena data harian, pola mingguan diperhitungkan
+dengan `frequency = 7`.
+
+```{r}
+n.train <- 80
+y.all   <- data100$y
+train   <- y.all[1:n.train]
+test    <- y.all[(n.train + 1):100]
+
+train.ts <- ts(train, frequency = 7)
+test.ts  <- ts(test,  start = n.train + 1)
+```
+
+## Eksplorasi Data
+
+### Plot Data Penuh
+
+```{r}
+plot.ts(ts(y.all), lty = 1, xlab = "Waktu (hari ke-)", ylab = "Jumlah Penumpang",
+        main = "Plot Data Jumlah Penumpang Monorail")
+abline(v = n.train, col = "red", lty = 2)
+```
+
+Garis merah putus-putus memisahkan data latih (kiri) dan data uji (kanan).
+
+### Plot Data Latih
+
+```{r}
+plot.ts(ts(train), lty = 1, xlab = "Waktu (hari ke-)", ylab = "Jumlah Penumpang",
+        main = "Plot Data Latih")
+```
+
+### Plot Data Uji
+
+```{r}
+plot.ts(test.ts, lty = 1, xlab = "Waktu (hari ke-)", ylab = "Jumlah Penumpang",
+        main = "Plot Data Uji")
+```
+
+Pada plot terlihat pola yang berulang setiap 7 hari: jumlah penumpang pada
+hari kerja lebih tinggi (sekitar 52 ribu sampai 62 ribu) dibandingkan akhir
+pekan (sekitar 35 ribu sampai 50 ribu). Selain itu terdapat beberapa
+penurunan tajam yang tidak mengikuti pola mingguan, yaitu pada 28 Maret 2024
+(sekitar 38 ribu, pada data latih), 7 dan 8 Mei 2024 (sekitar 29 ribu dan 28
+ribu), serta 22 Mei 2024 (sekitar 42 ribu). Tiga tanggal terakhir berada pada
+data uji. Pola mingguan akan dicek melalui plot ACF, sedangkan penurunan
+tajam tersebut dicatat sebagai pencilan yang dapat memengaruhi pendugaan
+model (untuk pencilan pada data latih) dan akurasi peramalan (untuk pencilan
+pada data uji).
+
+# Uji Stasioneritas Data
+
+## Plot ACF
+
+```{r}
+stats::acf(train, lag.max = 28, main = "ACF Data Latih")
+acf.train <- stats::acf(train, lag.max = 28, plot = FALSE)$acf[-1]
+lag.max.acf <- which.max(abs(acf.train))
+```
+
+Plot ACF menunjukkan autokorelasi yang kembali menguat pada lag kelipatan 7
+(lag ke-7 sebesar 0,585 dan lag ke-14 sebesar
+0,323), dengan autokorelasi terbesar berada pada lag
+ke-7 (0,585). Pola naik-turun yang
+berulang setiap 7 lag mengindikasikan bahwa data mengandung pola musiman
+mingguan sehingga data belum dapat dikatakan stasioner dalam rataan jika
+hanya dilihat secara eksplorasi.
+
+## Uji ADF
+
+```{r}
+adf.awal <- tseries::adf.test(train)
+adf.awal
+```
+
+$H_0$ : Data tidak stasioner dalam rataan
+
+$H_1$ : Data stasioner dalam rataan
+
+Berdasarkan uji ADF, didapat *p-value* sebesar 0,0189 yang
+lebih kecil dari taraf nyata 5% sehingga tolak $H_0$ dan data stasioner
+dalam rataan menurut uji ADF. Namun, plot ACF masih menunjukkan pola
+musiman sehingga pola tersebut tetap perlu ditangani pada tahap pemodelan.
+(Uji ADF menguji akar unit biasa, bukan akar unit musiman, sehingga uji ini
+tidak menggantikan pemeriksaan pola musiman pada plot ACF.)
+
+## Plot Box-Cox
+
+```{r}
+index <- seq(1:n.train)
+bc <- boxcox(train ~ index, lambda = seq(-2, 4, by = 0.1))
+
+lambda.opt <- bc$x[which.max(bc$y)]
+ci <- bc$x[bc$y > max(bc$y) - 0.5 * qchisq(0.95, 1)]
+c(Lambda_Optimum = lambda.opt, Batas_Bawah = min(ci), Batas_Atas = max(ci))
+```
+
+Nilai $\lambda$ optimum sebesar 3,88 dengan selang kepercayaan
+95% antara 2,30 dan 4,00. Selang tersebut tidak
+memuat nilai 1 sehingga data belum stasioner dalam ragam. Batas atas selang
+berimpit dengan batas atas rentang $\lambda$ yang dicoba (4), dan Box-Cox
+terhadap indeks waktu tidak memperhitungkan pola musiman maupun pencilan,
+sehingga hasil ini perlu ditafsirkan hati-hati. Pada tugas ini transformasi
+tidak dilakukan agar sejalan dengan materi, dan hal ini dicatat sebagai
+keterbatasan.
+
+# Penanganan Ketidakstasioneran Data
+
+Karena terdapat pola mingguan, dilakukan differencing musiman lag 7
+($D = 1$). Dilanjutkan differencing biasa ($d = 1$) apabila data masih
+belum stasioner.
+
+```{r}
+# Differencing musiman lag 7
+train.d7 <- diff(train, lag = 7)
+plot.ts(train.d7, xlab = "Waktu", ylab = "Selisih lag 7",
+        main = "Plot Differencing Musiman (lag 7)")
+abline(h = mean(train.d7), col = "red", lty = 2)
+```
+
+```{r}
+stats::acf(train.d7,  lag.max = 28, main = "ACF Differencing Musiman")
+stats::pacf(train.d7, lag.max = 28, main = "PACF Differencing Musiman")
+```
+
+```{r}
+adf.d7 <- tseries::adf.test(train.d7)
+adf.d7
+```
+
+Uji ADF setelah differencing musiman menghasilkan *p-value*
+0,282 (> 0,05 sehingga data belum stasioner dalam rataan).
+Artinya differencing musiman saja belum cukup, sehingga perlu differencing
+biasa tambahan.
+
+```{r}
+# Differencing tambahan (d = 1)
+train.d7d1 <- diff(train.d7, differences = 1)
+adf.d7d1 <- tseries::adf.test(train.d7d1)
+adf.d7d1
+```
+
+Setelah differencing musiman dan differencing biasa, *p-value* uji ADF
+adalah 0,0100 (< 0,05) sehingga data sudah stasioner
+dalam rataan. Dengan demikian model tentatif yang dibandingkan menggunakan
+$d = 1$ dan $D = 1$. (Perlu dicatat bahwa setelah dua kali differencing hanya
+tersisa 72 pengamatan, dan uji ADF pada sampel sekecil ini
+memiliki daya yang terbatas. Kemungkinan *over-differencing* dibahas pada
+bagian model terbaik.)
+
+Seperti pada materi, kestasioneran dalam ragam dicek kembali dengan
+Box-Cox pada data hasil differencing. Karena Box-Cox mensyaratkan nilai
+positif, data hasil differencing digeser terlebih dahulu dengan sebuah
+konstanta.
+
+```{r}
+index.diff <- seq(1:length(train.d7d1))
+
+min.val <- min(train.d7d1)
+if (min.val <= 0) {
+  c.shift <- abs(min.val) + 1
+  train.shifted <- train.d7d1 + c.shift
+} else {
+  train.shifted <- train.d7d1
+}
+
+bc.diff <- boxcox(train.shifted ~ index.diff, lambda = seq(0.5, 2, by = 0.1))
+
+lambda.opt.diff <- bc.diff$x[which.max(bc.diff$y)]
+ci.diff <- bc.diff$x[bc.diff$y > max(bc.diff$y) - 0.5 * qchisq(0.95, df = 1)]
+c(Lambda_Optimum = lambda.opt.diff, Batas_Bawah = min(ci.diff), Batas_Atas = max(ci.diff))
+```
+
+Nilai $\lambda$ optimum setelah differencing sebesar 0,92
+dengan selang kepercayaan 95% antara 0,68 dan
+1,23. Selang tersebut memuat nilai 1 sehingga data hasil
+differencing dianggap stasioner dalam ragam dan dapat dilanjutkan ke tahap
+identifikasi model. Karena data digeser dengan konstanta, nilai $\lambda$ ini
+bergantung pada konstanta yang dipilih sehingga hanya dipakai sebagai
+pemeriksaan kasar, sesuai prosedur pada materi.
+
+# Identifikasi Model
+
+```{r}
+acf.d   <- stats::acf(train.d7d1,  lag.max = 28, plot = FALSE)$acf[-1]
+pacf.d  <- stats::pacf(train.d7d1, lag.max = 28, plot = FALSE)$acf
+batas   <- 1.96 / sqrt(length(train.d7d1))
+```
+
+## Plot ACF
+
+```{r}
+stats::acf(train.d7d1, lag.max = 28, main = "ACF Differencing Musiman + Biasa")
+```
+
+Berdasarkan plot ACF data hasil differencing ($d = 1$, $D = 1$), spike
+signifikan terlihat pada lag ke-1 (-0,29) dan lag ke-7
+(-0,26) dengan batas signifikansi sekitar $\pm$
+0,23. Spike pada lag ke-1 menunjukkan adanya komponen MA
+non-musiman ($q = 1$), sedangkan spike pada lag ke-7 menunjukkan komponen MA
+musiman ($Q = 1$). Spike kecil pada lag yang lebih jauh tidak diperhatikan
+karena nilainya hanya sedikit di atas batas. Jika PACF dianggap *tails off*,
+model tentatifnya adalah ARIMA(0,1,1)(0,1,1)[7].
+
+## Plot PACF
+
+```{r}
+stats::pacf(train.d7d1, lag.max = 28, main = "PACF Differencing Musiman + Biasa")
+```
+
+Berdasarkan plot PACF, spike signifikan terlihat pada lag ke-1
+(-0,29), sedangkan lag berikutnya menurun secara perlahan
+(lag ke-2 sebesar -0,20 dan lag ke-3 sebesar
+-0,14). Jika plot ACF dianggap *tails off*, maka model
+tentatifnya adalah ARIMA(1,1,0)(0,1,1)[7]. Jika baik ACF maupun PACF
+dianggap *tails off*, model yang terbentuk adalah ARIMA(1,1,1)(0,1,1)[7].
+
+## Plot EACF
+
+```{r}
+eacf(train.d7d1)
+```
+
+EACF dibaca dari ujung segitiga pola nol (o) untuk menentukan orde (p, q)
+non-musiman. Pada hasil di atas, kolom MA ke-0 masih berisi x pada baris AR
+0 sampai 6 dan sisanya hampir seluruhnya berupa o, sehingga ujung segitiga
+tidak tegas dan mengarah ke orde kecil ($p, q \le 1$). EACF ini dihitung pada
+data yang masih memuat struktur musiman lag 7, sehingga EACF hanya dipakai
+sebagai penguat untuk model dengan orde non-musiman kecil, bukan sebagai
+penentu tunggal.
+
+## Model Tentatif
+
+Berdasarkan ACF, PACF, dan EACF, ditetapkan model tentatif berikut (dengan
+$s = 7$). Model dengan $d = 0$ dan model ARIMA non-musiman disertakan sebagai
+pembanding saja, karena hasil uji ADF menunjukkan data memerlukan
+differencing musiman dan differencing biasa.
+
+```{r}
+kandidat <- list(
+  "ARIMA(0,0,0)(0,1,1)[7]" = list(order = c(0,0,0), seasonal = c(0,1,1)),
+  "ARIMA(1,0,0)(0,1,1)[7]" = list(order = c(1,0,0), seasonal = c(0,1,1)),
+  "ARIMA(0,0,1)(0,1,1)[7]" = list(order = c(0,0,1), seasonal = c(0,1,1)),
+  "ARIMA(1,0,1)(0,1,1)[7]" = list(order = c(1,0,1), seasonal = c(0,1,1)),
+  "ARIMA(0,1,1)(0,1,1)[7]" = list(order = c(0,1,1), seasonal = c(0,1,1)),
+  "ARIMA(1,1,0)(0,1,1)[7]" = list(order = c(1,1,0), seasonal = c(0,1,1)),
+  "ARIMA(0,1,1)"           = list(order = c(0,1,1), seasonal = c(0,0,0))
+)
+kable(data.frame(No = seq_along(kandidat), Model = names(kandidat)))
+```
+
+# Pendugaan Parameter Model Tentatif
+
+```{r}
+fit.model <- function(spec) {
+  Arima(train.ts, order = spec$order,
+        seasonal = list(order = spec$seasonal, period = 7), method = "ML")
+}
+models <- lapply(kandidat, fit.model)
+
+for (nm in names(models)) {
+  cat("\n=====", nm, "=====\n")
+  print(summary(models[[nm]]))
+  print(coeftest(models[[nm]]))
+}
+```
+
+## Ringkasan AIC
+
+```{r}
+signif.all <- function(m) {
+  ct <- suppressWarnings(coeftest(m))
+  p <- ct[, 4]
+  p <- p[!grepl("drift|intercept", rownames(ct))]
+  if (length(p) == 0) return(TRUE)
+  all(!is.na(p) & p < 0.05)
+}
+
+arma.all <- sapply(models, function(m) m$arma)   # baris 6 = d, baris 7 = D
+tabel.model <- data.frame(
+  Model = names(models),
+  d = arma.all[6, ],
+  D = arma.all[7, ],
+  AIC = sapply(models, AIC),
+  BIC = sapply(models, BIC),
+  Param.Signifikan = sapply(models, signif.all),
+  row.names = NULL
+)
+tabel.model[order(tabel.model$AIC), ]
+```
+
+```{r}
+# AIC hanya sah dibandingkan antar model dengan orde differencing (d, D) yang sama,
+# karena differencing mengubah data yang dimodelkan. Berdasarkan uji ADF dipakai d = 1 dan D = 1.
+# Model terbaik: AIC terkecil di antara model (d = 1, D = 1) dengan seluruh parameter signifikan
+pembanding <- tabel.model[tabel.model$d == 1 & tabel.model$D == 1, ]
+layak <- pembanding[pembanding$Param.Signifikan, ]
+if (nrow(layak) == 0) layak <- pembanding
+nama.terbaik <- layak$Model[which.min(layak$AIC)]
+model.terbaik <- models[[nama.terbaik]]
+nama.terbaik
+```
+
+Catatan: AIC hanya dibandingkan antar model dengan orde differencing yang
+sama ($d = 1$, $D = 1$). Model dengan $d$ atau $D$ berbeda memodelkan deret
+yang berbeda sehingga nilai AIC-nya tidak bisa diadu langsung; model
+tersebut ditampilkan hanya sebagai referensi.
+
+Di antara model dengan $d = 1$ dan $D = 1$, AIC terkecil dimiliki oleh model
+**ARIMA(0,1,1)(0,1,1)[7]** (AIC = 1415,83) dan seluruh
+parameternya signifikan pada taraf nyata 5%. Model inilah yang dipilih untuk
+dianalisis lebih lanjut.
+
+# Analisis Sisaan
+
+Model terbaik hasil identifikasi kemudian dicek asumsi sisaannya. Sisaan
+model ARIMA harus memenuhi asumsi normalitas, kebebasan sisaan, dan
+kehomogenan ragam, serta bernilai tengah nol. Diagnostik model dilakukan
+secara eksplorasi dan uji formal.
+
+## Eksplorasi Sisaan
+
+```{r}
+sisaan <- as.numeric(residuals(model.terbaik))
+
+par(mfrow = c(2, 2))
+car::qqPlot(sisaan, main = "Normal Q-Q Plot", ylab = "Sisaan")
+plot(sisaan, type = "p", main = "Plot Sisaan vs Waktu", xlab = "Waktu", ylab = "Sisaan")
+abline(h = 0, col = "red")
+stats::acf(sisaan,  lag.max = 28, main = "ACF Sisaan")
+stats::pacf(sisaan, lag.max = 28, main = "PACF Sisaan")
+par(mfrow = c(1, 1))
+```
+
+```{r}
+batas.sis <- 1.96 / sqrt(length(sisaan))
+k.acf  <- sum(abs(stats::acf(sisaan,  lag.max = 28, plot = FALSE)$acf[-1]) > batas.sis)
+k.pacf <- sum(abs(stats::pacf(sisaan, lag.max = 28, plot = FALSE)$acf)     > batas.sis)
+```
+
+Pada plot kuantil-kuantil normal, sebagian besar titik mengikuti garis
+$45^{\circ}$, tetapi pengamatan ke-45 (28 Maret 2024) dan ke-79 (1 Mei 2024)
+ditandai sebagai titik yang paling menyimpang dari garis. Kedua titik ini
+berkaitan dengan pencilan yang telah dicatat pada tahap eksplorasi data.
+Pada plot sisaan terhadap waktu, sisaan menyebar di sekitar nol; lebar pita
+sisaan perlu dicermati terutama di sekitar pencilan tersebut. Pada plot ACF
+dan PACF sisaan, terdapat 1 lag (dari 28 lag pertama) pada ACF dan
+1 lag pada PACF yang keluar dari batas signifikansi, sehingga secara
+eksploratif kebebasan sisaan perlu dikonfirmasi dengan uji formal.
+
+## Uji Formal
+
+```{r}
+# 1) Kenormalan
+uji.ks <- ks.test(sisaan, "pnorm", mean(sisaan), sd(sisaan))
+# 2) Kebebasan sisaan (autokorelasi), derajat bebas disesuaikan dengan banyak parameter
+uji.lb <- Box.test(sisaan, lag = 10, type = "Ljung",
+                   fitdf = length(coef(model.terbaik)))
+# 3) Kehomogenan ragam
+uji.arch <- Box.test(sisaan^2, lag = 10, type = "Ljung")
+# 4) Nilai tengah sisaan sama dengan nol
+uji.t <- t.test(sisaan, mu = 0, conf.level = 0.95)
+
+hasil.diag <- data.frame(
+  Asumsi = c("Normalitas (Kolmogorov-Smirnov)", "Kebebasan (Ljung-Box)",
+             "Homogenitas ragam (Ljung-Box sisaan kuadrat)", "Nilai tengah = 0 (uji-t)"),
+  p.value = c(uji.ks$p.value, uji.lb$p.value, uji.arch$p.value, uji.t$p.value)
+)
+hasil.diag$Keputusan <- ifelse(hasil.diag$p.value > 0.05,
+                               "Asumsi terpenuhi", "Asumsi tidak terpenuhi")
+hasil.diag
+```
+
+**1) Kenormalan (Kolmogorov-Smirnov)**
+
+$H_0$ : Sisaan menyebar normal
+
+$H_1$ : Sisaan tidak menyebar normal
+
+Didapat *p-value* sebesar 0,0380. Nilai ini lebih kecil
+dari taraf nyata 5% sehingga tolak $H_0$ dan sisaan **tidak menyebar normal**.
+Hal ini sejalan dengan plot kuantil-kuantil normal yang menunjukkan
+penyimpangan pada pengamatan pencilan. Dampaknya: titik ramalan umumnya
+tidak terlalu terpengaruh, tetapi selang prediksi yang dibentuk dengan asumsi
+normal kurang dapat diandalkan. (Uji KS dengan rataan dan simpangan baku
+yang diduga dari data bersifat konservatif, sehingga hasil ini sebaiknya
+dibaca bersama plot Q-Q.)
+
+**2) Kebebasan sisaan (Ljung-Box, lag 10)**
+
+$H_0$ : Sisaan saling bebas
+
+$H_1$ : Sisaan tidak saling bebas
+
+Didapat *p-value* sebesar 0,4593 yang lebih besar dari
+taraf nyata 5% sehingga gagal tolak $H_0$ dan sisaan saling bebas (tidak ada
+autokorelasi). Uji ini memakai 10 lag dan derajat bebas yang dikurangi
+banyaknya parameter model, sehingga lebih tepat dibanding pengujian pada satu
+lag saja.
+
+**3) Kehomogenan ragam (Ljung-Box pada sisaan kuadrat)**
+
+$H_0$ : Ragam sisaan homogen
+
+$H_1$ : Ragam sisaan tidak homogen
+
+Didapat *p-value* sebesar 0,7379 yang lebih besar dari
+taraf nyata 5% sehingga gagal tolak $H_0$ dan ragam sisaan homogen.
+
+**4) Nilai tengah sisaan (uji-t)**
+
+$H_0$ : Nilai tengah sisaan sama dengan 0
+
+$H_1$ : Nilai tengah sisaan tidak sama dengan 0
+
+Didapat *p-value* sebesar 0,9034 yang lebih besar dari
+taraf nyata 5% sehingga gagal tolak $H_0$ dan nilai tengah sisaan sama
+dengan nol.
+
+**Kesimpulan diagnostik:** asumsi kebebasan sisaan, kehomogenan ragam, dan
+nilai tengah nol terpenuhi, sedangkan asumsi normalitas tidak terpenuhi.
+Pelanggaran normalitas kemungkinan besar disebabkan pencilan, bukan
+kesalahan spesifikasi struktur model, karena tidak ada autokorelasi sisa.
+Model tetap dapat digunakan untuk peramalan titik, dengan catatan pada
+selang prediksi.
+
+# Overfitting
+
+Overfitting dilakukan dengan menaikkan orde AR ($p$) dan MA ($q$)
+non-musiman dari model terbaik untuk melihat apakah ada model yang lebih
+baik.
+
+```{r}
+o <- model.terbaik$arma          # (p, q, P, Q, s, d, D)
+p0 <- o[1]; q0 <- o[2]; P0 <- o[3]; Q0 <- o[4]; d0 <- o[6]; D0 <- o[7]
+
+fit.over <- function(p, q) {
+  Arima(train.ts, order = c(p, d0, q),
+        seasonal = list(order = c(P0, D0, Q0), period = 7), method = "ML")
+}
+over <- list(fit.over(p0 + 1, q0), fit.over(p0, q0 + 1))
+names(over) <- c(sprintf("ARIMA(%d,%d,%d)(%d,%d,%d)[7]", p0 + 1, d0, q0, P0, D0, Q0),
+                 sprintf("ARIMA(%d,%d,%d)(%d,%d,%d)[7]", p0, d0, q0 + 1, P0, D0, Q0))
+
+for (nm in names(over)) {
+  cat("\n=====", nm, "=====\n")
+  print(coeftest(over[[nm]]))
+}
+```
+
+```{r}
+tabel.over <- data.frame(
+  Model = c(nama.terbaik, names(over)),
+  AIC = c(AIC(model.terbaik), sapply(over, AIC)),
+  BIC = c(BIC(model.terbaik), sapply(over, BIC)),
+  Param.Signifikan = c(signif.all(model.terbaik), sapply(over, signif.all)),
+  row.names = NULL
+)
+tabel.over
+
+over.lebih.baik <- any(tabel.over$AIC[-1] < tabel.over$AIC[1] & tabel.over$Param.Signifikan[-1])
+if (over.lebih.baik) {
+  idx <- which.min(ifelse(tabel.over$Param.Signifikan, tabel.over$AIC, Inf))
+  nama.final  <- tabel.over$Model[idx]
+  model.final <- if (idx == 1) model.terbaik else over[[idx - 1]]
+} else {
+  nama.final  <- nama.terbaik
+  model.final <- model.terbaik
+}
+nama.final
+```
+
+Kedua model hasil *overfitting* (ARIMA(1,1,1)(0,1,1)[7] dan ARIMA(0,1,2)(0,1,1)[7])
+memiliki AIC yang lebih besar (1416,30 dan
+1416,40) dibandingkan model awal
+(1415,83), dan parameter tambahannya tidak signifikan.
+Oleh karena itu, model yang digunakan untuk peramalan adalah
+**ARIMA(0,1,1)(0,1,1)[7]**.
+
+# Model Terbaik
+
+```{r}
+summary(model.final)
+coeftest(model.final)
+```
+
+```{r}
+sma1.hat <- unname(coef(model.final)["sma1"])
+sma1.se  <- unname(sqrt(diag(vcov(model.final)))["sma1"])
+```
+
+Model akhir adalah **ARIMA(0,1,1)(0,1,1)[7]** dengan koefisien MA non-musiman sebesar
+-0,4998 dan koefisien MA musiman sebesar
+-1,0000 (galat baku 0,1545).
+
+**Catatan kritis.** Koefisien MA musiman berada tepat di batas
+keterbalikan (*invertibility*), yaitu $|\Theta_1| \approx 1$. Kondisi ini
+juga muncul pada hampir semua model tentatif bermusim. Ada dua konsekuensi:
+(1) uji-z untuk koefisien tersebut tidak sepenuhnya valid di batas parameter,
+sehingga tanda signifikansinya tidak boleh ditafsirkan berlebihan; dan
+(2) ini dapat menandakan *over-differencing* musiman, artinya pola mingguan
+mungkin lebih tepat dimodelkan sebagai musiman deterministik (bukan akar unit
+musiman). Hal ini ditindaklanjuti dengan model pembanding tanpa differencing
+musiman pada bagian Analisis Tambahan. Untuk keperluan tugas ini, model akhir
+tetap mengikuti prosedur pada materi.
+
+# Peramalan
+
+Peramalan dilakukan dengan fungsi `forecast()` untuk 20 hari ke depan
+(sepanjang data uji). Karena differencing sudah termasuk dalam model pada
+fungsi `Arima()`, hasil ramalan langsung berada pada skala data asli
+(tidak perlu *inverse differencing* manual).
+
+```{r}
+h <- length(test)
+ramalan <- forecast::forecast(model.final, h = h)
+ramalan
+```
+
+```{r}
+plot(ramalan, xlab = "Waktu (minggu)", ylab = "Jumlah Penumpang",
+     main = paste("Ramalan", nama.final))
+```
+
+Hasil ramalan mengikuti pola mingguan: nilai tinggi pada hari kerja (sekitar
+52.800
+penumpang) dan turun pada akhir pekan (sekitar
+42.300
+penumpang), dengan selang prediksi yang melebar seiring bertambahnya
+horizon. Pola ini sesuai dengan karakter data latih, tetapi ramalan tidak
+mampu mengantisipasi penurunan tajam yang tidak mengikuti pola mingguan.
+
+## Perbandingan Aktual vs Ramalan
+
+```{r}
+hasil.ramalan <- as.numeric(ramalan$mean)
+
+perbandingan <- data.frame(
+  Hari = (n.train + 1):100,
+  Tanggal = data100$date[(n.train + 1):100],
+  Aktual = test,
+  Forecast = round(hasil.ramalan, 0),
+  Galat = round(test - hasil.ramalan, 0)
+)
+perbandingan
+```
+
+```{r}
+plot(ts(y.all), type = "l", col = "black", xlab = "Waktu (hari ke-)",
+     ylab = "Jumlah Penumpang", main = "Data Aktual dan Hasil Peramalan")
+lines((n.train + 1):100, hasil.ramalan, col = "blue", lty = 2, lwd = 2)
+legend("bottomleft", legend = c("Data Aktual", "Forecast"),
+       col = c("black", "blue"), lty = c(1, 2), lwd = c(1, 2), bty = "n")
+```
+
+## Akurasi
+
+```{r}
+akurasi <- accuracy(hasil.ramalan, test)
+akurasi
+```
+
+```{r}
+# Analisis sensitivitas: akurasi tanpa pencilan pada data uji
+pencilan.tgl <- as.Date(c("2024-05-07", "2024-05-08", "2024-05-22"))
+idx.pencilan <- which(data100$date[(n.train + 1):100] %in% pencilan.tgl)
+idx.bersih   <- setdiff(seq_along(test), idx.pencilan)
+
+akurasi.bersih <- accuracy(hasil.ramalan[idx.bersih], test[idx.bersih])
+galat <- test - hasil.ramalan
+
+rbind("Semua data uji" = akurasi["Test set", c("ME","RMSE","MAE","MAPE")],
+      "Tanpa pencilan" = akurasi.bersih["Test set", c("ME","RMSE","MAE","MAPE")])
+```
+
+Pada seluruh data uji diperoleh RMSE sebesar
+8.874,
+MAE sebesar
+5.980,
+dan MAPE sebesar 15,60%. Nilai ini sangat
+dipengaruhi oleh penurunan tajam pada tanggal pencilan (7 dan 8 Mei 2024
+dengan galat sekitar -24 ribu, serta 22 Mei 2024). Jika ketiga tanggal
+tersebut dikeluarkan, RMSE turun menjadi
+3.898
+dan MAPE menjadi 6,78%. Artinya
+model cukup baik menangkap pola mingguan pada hari-hari normal, dan
+penurunan akurasi terutama berasal dari kejadian luar pola yang tidak dapat
+diramalkan oleh model deret waktu univariat.
+
+# Analisis Tambahan: Model Musiman Tanpa Differencing Musiman
+
+Bagian ini bersifat pembanding, bukan pengganti prosedur utama. Tujuannya
+menguji apakah pola mingguan lebih baik ditangkap dengan komponen AR musiman
+tanpa differencing musiman ($D = 0$), mengingat uji ADF awal menyatakan data
+stasioner dan koefisien MA musiman model utama berada di batas. Karena orde
+differencing berbeda, AIC tidak dibandingkan. Perbandingan dilakukan pada
+akurasi data uji, dengan catatan data uji hanya 20 pengamatan dan dipengaruhi
+pencilan, sehingga hasilnya tidak dipakai untuk mengganti model utama secara
+otomatis.
+
+```{r}
+alt.spec <- list(
+  "ARIMA(1,0,0)(1,0,0)[7]" = list(order = c(1,0,0), seasonal = c(1,0,0)),
+  "ARIMA(1,0,1)(1,0,0)[7]" = list(order = c(1,0,1), seasonal = c(1,0,0)),
+  "ARIMA(1,0,0)(1,0,1)[7]" = list(order = c(1,0,0), seasonal = c(1,0,1))
+)
+alt.models <- lapply(alt.spec, function(s)
+  tryCatch(Arima(train.ts, order = s$order,
+                 seasonal = list(order = s$seasonal, period = 7), method = "ML"),
+           error = function(e) NULL))
+alt.models <- Filter(Negate(is.null), alt.models)
+
+for (nm in names(alt.models)) {
+  cat("\n=====", nm, "=====\n")
+  print(coeftest(alt.models[[nm]]))
+}
+```
+
+```{r}
+alt.pred  <- lapply(alt.models, function(m) as.numeric(forecast::forecast(m, h = h)$mean))
+semua.pred <- c(setNames(list(hasil.ramalan), nama.final), alt.pred)
+
+ambil <- function(pred, idx = seq_along(test)) {
+  accuracy(pred[idx], test[idx])["Test set", c("RMSE", "MAE", "MAPE")]
+}
+a1 <- t(sapply(semua.pred, ambil))
+a2 <- t(sapply(semua.pred, ambil, idx = idx.bersih))
+
+# Kriteria kelayakan pembanding: seluruh parameter signifikan dan koefisien AR musiman
+# tidak mendekati 1 (|sar| < 0,95), agar tidak terjadi akar unit musiman yang tersamar
+layak.alt <- sapply(alt.models, function(m) {
+  cf  <- coef(m)
+  sar <- cf[grepl("^sar", names(cf))]
+  signif.all(m) && all(abs(sar) < 0.95)
+})
+
+tabel.alt <- data.frame(
+  Model = names(semua.pred),
+  RMSE.semua   = a1[, "RMSE"], MAPE.semua   = a1[, "MAPE"],
+  RMSE.tanpa.pencilan = a2[, "RMSE"], MAPE.tanpa.pencilan = a2[, "MAPE"],
+  Layak = c(NA, unname(layak.alt)),
+  row.names = NULL
+)
+tabel.alt
+```
+
+Model pembanding dinilai layak jika seluruh parameternya signifikan dan
+koefisien AR musimannya tidak mendekati 1. Syarat kedua penting: pada model
+dengan AR musiman mendekati 1 dan MA musiman negatif besar, kedua komponen
+saling meniadakan sehingga model hampir setara dengan differencing musiman,
+dan hasilnya rapuh. Kolom `Layak` pada tabel di atas menunjukkan hasil
+pemeriksaan ini.
+
+```{r}
+kand <- which(tabel.alt$Layak %in% TRUE)
+ada.alt <- length(kand) > 0
+if (ada.alt) {
+  ia <- kand[which.min(tabel.alt$RMSE.semua[kand])]
+  nama.alt <- tabel.alt$Model[ia]
+  lebih.baik <- tabel.alt$RMSE.semua[ia] < tabel.alt$RMSE.semua[1] &&
+                tabel.alt$RMSE.tanpa.pencilan[ia] < tabel.alt$RMSE.tanpa.pencilan[1]
+}
+rb <- function(x) format(round(x), big.mark = ".", decimal.mark = ",")
+```
+
+Model pembanding layak dengan RMSE terkecil pada seluruh data uji adalah ARIMA(1,0,0)(1,0,0)[7]. RMSE-nya 8.282 (semua data uji) dan 2.977 (tanpa pencilan), dibandingkan model utama ARIMA(0,1,1)(0,1,1)[7] sebesar 8.874 dan 3.898. Model pembanding ini lebih akurat pada kedua ukuran, sehingga pemodelan musiman tanpa differencing musiman layak dipertimbangkan sebagai model alternatif.
+
